@@ -78,25 +78,174 @@ def home():
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Semantic Fashion Search</title>
 <style>
-body{font-family:system-ui;margin:0;background:#0f172a;color:#f1f5f9}
-.container{max-width:900px;margin:60px auto;padding:20px}
-.card{background:#1e293b;border-radius:16px;padding:24px}
-h1{margin-top:0}
-input,button{padding:12px;border-radius:10px;border:none;font-size:14px}
-input{width:60%;margin-right:8px}
-button{background:#6366f1;color:white;cursor:pointer}
-button:hover{background:#4f46e5}
-.result{background:#334155;margin-top:10px;padding:12px;border-radius:10px;display:flex;justify-content:space-between;gap:14px}
-.score{opacity:0.7;font-size:13px;white-space:nowrap}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+    font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    margin:0;
+    min-height:100vh;
+    background:
+        radial-gradient(circle at 0 0,rgba(56,189,248,0.08),transparent 50%),
+        radial-gradient(circle at 100% 0,rgba(168,85,247,0.08),transparent 55%),
+        radial-gradient(circle at 50% 100%,rgba(59,130,246,0.14),transparent 55%),
+        #020617;
+    color:#e5e7eb;
+    display:flex;
+    align-items:flex-start;
+    justify-content:center;
+    padding:40px 16px;
+}
+.container{
+    width:100%;
+    max-width:960px;
+}
+.card{
+    background:rgba(15,23,42,0.9);
+    border-radius:20px;
+    padding:24px 24px 20px;
+    box-shadow:0 24px 80px rgba(15,23,42,0.9);
+    border:1px solid rgba(148,163,184,0.25);
+    backdrop-filter:blur(16px);
+    animation:card-in 320ms ease-out;
+}
+.header-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    margin-bottom:18px;
+}
+h1{
+    margin:0;
+    font-size:24px;
+    letter-spacing:0.02em;
+    display:flex;
+    align-items:center;
+    gap:8px;
+}
+.badge{
+    font-size:11px;
+    padding:4px 10px;
+    border-radius:999px;
+    background:rgba(37,99,235,0.15);
+    color:#bfdbfe;
+    border:1px solid rgba(59,130,246,0.5);
+}
+.subtitle{
+    margin-top:4px;
+    font-size:13px;
+    color:#9ca3af;
+}
+.search-row{
+    display:flex;
+    gap:10px;
+    margin-top:18px;
+}
+input,button{
+    padding:12px 14px;
+    border-radius:999px;
+    border:none;
+    font-size:14px;
+}
+input{
+    flex:1;
+    background:#020617;
+    color:#e5e7eb;
+    border:1px solid rgba(148,163,184,0.4);
+    outline:none;
+}
+input::placeholder{
+    color:#6b7280;
+}
+button{
+    background:linear-gradient(135deg,#6366f1,#8b5cf6);
+    color:white;
+    cursor:pointer;
+    font-weight:500;
+    padding-inline:20px;
+    box-shadow:0 10px 30px rgba(79,70,229,0.6);
+    transition:transform .08s ease,box-shadow .08s ease,filter .08s ease;
+}
+button:hover{
+    transform:translateY(-1px);
+    box-shadow:0 14px 40px rgba(79,70,229,0.75);
+    filter:brightness(1.05);
+}
+button:active{
+    transform:translateY(0);
+    box-shadow:0 6px 18px rgba(79,70,229,0.5);
+}
+.results-meta{
+    margin-top:18px;
+    font-size:12px;
+    color:#9ca3af;
+}
+.results-meta span{
+    color:#e5e7eb;
+}
+.results{
+    margin-top:10px;
+}
+.result{
+    background:#020617;
+    margin-top:8px;
+    padding:12px 14px;
+    border-radius:12px;
+    display:flex;
+    justify-content:space-between;
+    gap:14px;
+    border:1px solid rgba(30,64,175,0.3);
+    box-shadow:0 4px 18px rgba(15,23,42,0.75);
+    font-size:14px;
+    opacity:0;
+    transform:translateY(4px);
+    animation:result-in 220ms ease-out forwards;
+}
+.result:hover{
+    border-color:rgba(96,165,250,0.7);
+}
+.title{
+    flex:1;
+}
+.score{
+    opacity:0.7;
+    font-size:12px;
+    white-space:nowrap;
+}
+.empty{
+    margin-top:12px;
+    font-size:13px;
+    color:#9ca3af;
+}
+@keyframes card-in{
+    from{opacity:0;transform:translateY(8px) scale(.98)}
+    to{opacity:1;transform:translateY(0) scale(1)}
+}
+@keyframes result-in{
+    from{opacity:0;transform:translateY(4px)}
+    to{opacity:1;transform:translateY(0)}
+}
+@media (max-width:600px){
+    .card{padding:18px 16px 16px}
+    .search-row{flex-direction:column}
+    button{width:100%}
+}
 </style>
 </head>
 <body>
 <div class="container">
 <div class="card">
-<h1>🔎 Semantic Fashion Search</h1>
-<input id="query" placeholder="Try: black leather biker jacket"/>
-<button onclick="search()">Search</button>
-<div id="results"></div>
+  <div class="header-row">
+    <div>
+      <h1>🔎 Semantic Fashion Search</h1>
+      <p class="subtitle">Vector + keyword hybrid ranking for Amazon Fashion.</p>
+    </div>
+    <div class="badge">GKE · OpenSearch · MiniLM</div>
+  </div>
+  <div class="search-row">
+    <input id="query" placeholder="Try: black leather biker jacket" autofocus/>
+    <button onclick="search()">Search</button>
+  </div>
+  <div class="results-meta" id="results-meta"></div>
+  <div class="results" id="results"></div>
 </div>
 </div>
 
@@ -104,19 +253,23 @@ button:hover{background:#4f46e5}
 async function search(){
     const q = document.getElementById("query").value;
     const resDiv = document.getElementById("results");
-    resDiv.innerHTML = "Searching...";
+    const metaDiv = document.getElementById("results-meta");
+    resDiv.innerHTML = "";
+    metaDiv.innerHTML = "Searching…";
     const r = await fetch(`/search?q=${encodeURIComponent(q)}&k=5`);
     const data = await r.json();
     resDiv.innerHTML = "";
     if(!Array.isArray(data) || !data.length){
-        resDiv.innerHTML = "<div class='result'>No results</div>";
+        metaDiv.innerHTML = "";
+        resDiv.innerHTML = "<div class='empty'>No results. Try a more descriptive query like <span>\"black leather moto jacket\"</span>.</div>";
         return;
     }
+    metaDiv.innerHTML = `<span>${data.length}</span> results`;
     data.forEach(item=>{
         resDiv.innerHTML += `
             <div class="result">
-                <div>${item.title ?? ""}</div>
-                <div class="score">${(item.score ?? 0).toFixed(4)}</div>
+                <div class="title">${item.title ?? ""}</div>
+                <div class="score">score ${(item.score ?? 0).toFixed(4)}</div>
             </div>
         `;
     });
