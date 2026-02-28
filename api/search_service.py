@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from functools import lru_cache
 
 from fastapi import FastAPI, HTTPException
@@ -25,6 +26,8 @@ INDEX_NAME = os.getenv("INDEX_NAME", "products")
 
 VECTOR_WEIGHT = 0.4
 KEYWORD_WEIGHT = 0.6
+PHRASE_WEIGHT = 0.15
+FUZZY_WEIGHT = 0.05
 
 # Very small stopword list; everything else is treated as a content word.
 STOPWORDS = {
@@ -40,6 +43,8 @@ STOPWORDS = {
     "with",
 }
 
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+
 model = None
 
 
@@ -47,12 +52,13 @@ model = None
 # Startup Lifecycle
 # ------------------------------------------------
 
-@app.on_event("startup")
-def load_model():
+def get_model():
     global model
-    logger.info("Loading embedding model...")
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    logger.info("Model loaded successfully.")
+    if model is None:
+        logger.info("Loading embedding model...")
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("Model loaded successfully.")
+    return model
 
 
 # ------------------------------------------------
@@ -286,6 +292,11 @@ header{
     transition:background .15s,border-color .15s;
 }
 .btn-why:hover{background:#f8fafc;border-color:#cbd5e1}
+.card-result.loading{pointer-events:none;opacity:0.9}
+.skeleton{display:block;border-radius:10px;background:linear-gradient(90deg,#f1f5f9 0%,#e2e8f0 50%,#f1f5f9 100%);background-size:200% 100%;animation:shimmer 1.1s linear infinite}
+.skeleton.title{height:0.9rem;margin-bottom:0.6rem}
+.skeleton.meta{height:0.7rem;width:70%;margin-bottom:0.7rem}
+.skeleton.btn{height:2rem;border-radius:999px}
 .empty-msg{margin-top:1rem;font-size:0.875rem;color:#64748b}
 .dialog-overlay{
     position:fixed;
@@ -324,6 +335,7 @@ header{
 @keyframes card-in{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
 @keyframes result-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 @keyframes dialog-in{from{opacity:0;transform:scale(0.96)}to{opacity:1;transform:scale(1)}}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 @media (max-width:600px){
     .glass-card{padding:1.25rem}
     .search-row{flex-direction:column;align-items:stretch}
@@ -350,8 +362,8 @@ header{
         </div>
         <div class="signal-blend">
           <div class="label">Signal blend</div>
-          <div class="desc">MiniLM embeddings · OpenSearch KNN · Keyword re-rank</div>
-          <div class="note">Score = 0.4×vector + 0.6×keyword</div>
+          <div class="desc">MiniLM embeddings · OpenSearch KNN · BM25/phrase/fuzzy lexical re-rank</div>
+          <div class="note">Only shipping working pieces: hybrid recall + explainable scoring.</div>
         </div>
       </div>
 
@@ -380,6 +392,7 @@ header{
     <div>
       <h3 id="results-title">Recommended for you</h3>
       <p id="results-subtitle">Run a search or pick a category above.</p>
+      <p id="results-hint" style="font-size:0.78rem;color:#94a3b8;margin-top:0.35rem;">Tip: click “Why this?” to see semantic vs lexical contributions.</p>
     </div>
     <span class="badge-mode" id="badge-mode">GKE · OpenSearch · MiniLM</span>
   </div>
@@ -405,6 +418,15 @@ function setPills(){
     if ((btn.dataset.q || '') === currentQuery) btn.classList.add('active');
   });
 }
+function renderLoadingCards(container){
+  container.innerHTML = "";
+  for (var i=0; i<3; i++) {
+    var card = document.createElement('div');
+    card.className = "card-result loading";
+    card.innerHTML = "<span class=\"skeleton title\"></span><span class=\"skeleton meta\"></span><span class=\"skeleton btn\"></span>";
+    container.appendChild(card);
+  }
+}
 function search(optionalQ){
   var q = (optionalQ !== undefined ? optionalQ : document.getElementById('query').value).trim();
   currentQuery = q;
@@ -417,19 +439,21 @@ function search(optionalQ){
   emptyEl.style.display = 'none';
   if (!q){ titleEl.textContent = 'Recommended for you'; subEl.textContent = 'Run a search or pick a category above.'; return; }
   titleEl.textContent = 'Searching…';
-  subEl.textContent = '';
+  subEl.textContent = 'Blending semantic + lexical signals';
+  renderLoadingCards(resEl);
   fetch('/search?q=' + encodeURIComponent(q) + '&k=6')
     .then(function(r){ return r.json(); })
     .then(function(data){
-      titleEl.textContent = data.length ? 'Top matches for “‘ + q + '”' : 'No results for “‘ + q + '”';
+      titleEl.textContent = data.length ? 'Top matches for "' + q + '"' : 'No results for "' + q + '"';
       subEl.textContent = data.length ? data.length + ' results' : 'Try a different query or category.';
       if (!Array.isArray(data) || !data.length){ emptyEl.style.display = 'block'; return; }
       data.forEach(function(item, i){
         var card = document.createElement('div');
         card.className = 'card-result';
         var t = (item.title || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-card.innerHTML = '<div class="cat">PRODUCT</div><div class="title">' + t + '</div><div class="meta"><span>Relevance</span><span class="score-tag">' + (item.score != null ? item.score.toFixed(4) : '—') + '</span></div><button type="button" class="btn-why" data-title="' + (item.title || '').replace(/"/g,'&quot;') + '" data-score="' + (item.score != null ? item.score : '') + '">Why this?</button>';
-        card.querySelector('.btn-why').onclick = function(){ openDialog(this.dataset.title, this.dataset.score); };
+        var explain = item.explain || {};
+        card.innerHTML = '<div class="cat">PRODUCT</div><div class="title">' + t + '</div><div class="meta"><span>Relevance</span><span class="score-tag">' + (item.score != null ? item.score.toFixed(4) : '—') + '</span></div><button type="button" class="btn-why" data-title="' + (item.title || '').replace(/"/g,'&quot;') + '" data-score="' + (item.score != null ? item.score : '') + '" data-semantic="' + (explain.semantic != null ? explain.semantic : '') + '" data-lexical="' + (explain.lexical != null ? explain.lexical : '') + '" data-phrase="' + (explain.phrase != null ? explain.phrase : '') + '" data-fuzzy="' + (explain.fuzzy != null ? explain.fuzzy : '') + '">Why this?</button>';
+        card.querySelector('.btn-why').onclick = function(){ openDialog(this.dataset); };
         resEl.appendChild(card);
       });
     })
@@ -438,11 +462,13 @@ card.innerHTML = '<div class="cat">PRODUCT</div><div class="title">' + t + '</di
 document.querySelectorAll('.pills .pill').forEach(function(btn){
   btn.addEventListener('click', function(){ var q = this.dataset.q || ''; document.getElementById('query').value = q; search(q); });
 });
-function openDialog(title, score){
+function openDialog(data){
   document.getElementById('dialog-title').textContent = 'Why this result?';
-  var safeTitle = (title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,100);
-  if ((title || '').length > 100) safeTitle += '…';
-  document.getElementById('dialog-body').innerHTML = (safeTitle ? '<strong style="color:#0f172a">' + safeTitle + '</strong><br><br>' : '') + 'This item ranked highly from a blend of <strong>vector similarity</strong> (semantic match) and <strong>keyword overlap</strong> (e.g. query terms in the title). Score: <strong>' + (score || '—') + '</strong>.';
+  var title = data.title || '';
+  var safeTitle = title.replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,100);
+  if (title.length > 100) safeTitle += '…';
+  var details = 'Semantic: <strong>' + (data.semantic || '0') + '</strong> · Lexical: <strong>' + (data.lexical || '0') + '</strong> · Phrase: <strong>' + (data.phrase || '0') + '</strong> · Fuzzy: <strong>' + (data.fuzzy || '0') + '</strong>';
+  document.getElementById('dialog-body').innerHTML = (safeTitle ? '<strong style="color:#0f172a">' + safeTitle + '</strong><br><br>' : '') + 'This item ranked highly from a blend of <strong>vector similarity</strong> (semantic match) and <strong>lexical relevance</strong>. ' + details + '. Total: <strong>' + (data.score || '—') + '</strong>.';
   document.getElementById('dialog').classList.add('open'); document.getElementById('dialog').setAttribute('aria-hidden','false');
 }
 function closeDialog(){ document.getElementById('dialog').classList.remove('open'); document.getElementById('dialog').setAttribute('aria-hidden','true'); }
@@ -459,7 +485,32 @@ document.getElementById('dialog').addEventListener('click', function(e){ if (e.t
 
 @lru_cache(maxsize=1000)
 def embed_cached(q: str):
-    return model.encode(q).tolist()
+    return get_model().encode(q).tolist()
+
+
+def tokenize(text: str):
+    return TOKEN_RE.findall((text or "").lower())
+
+
+def normalized_knn_score(raw_score: float):
+    # OpenSearch knn scores are not naturally bounded; this provides a stable [0,1) range.
+    return raw_score / (1.0 + max(raw_score, 0.0))
+
+
+def jaccard_similarity(a_tokens, b_tokens):
+    a_set, b_set = set(a_tokens), set(b_tokens)
+    if not a_set or not b_set:
+        return 0.0
+    return len(a_set & b_set) / len(a_set | b_set)
+
+
+def normalize_text_score(scores_by_id):
+    if not scores_by_id:
+        return {}
+    max_score = max(scores_by_id.values())
+    if max_score <= 0:
+        return {doc_id: 0.0 for doc_id in scores_by_id}
+    return {doc_id: score / max_score for doc_id, score in scores_by_id.items()}
 
 
 # ------------------------------------------------
@@ -478,8 +529,8 @@ def search(q: str, k: int = 5):
 
     embedding = embed_cached(q)
 
-    # Step 1: Vector recall (top 50)
-    body = {
+    # Step 1: Vector recall
+    vector_body = {
         "size": 50,
         "query": {
             "knn": {
@@ -491,37 +542,84 @@ def search(q: str, k: int = 5):
         }
     }
 
+    # Step 2: Lexical recall (BM25 + phrase + fuzzy)
+    text_body = {
+        "size": 50,
+        "query": {
+            "bool": {
+                "should": [
+                    {"match": {"title": {"query": q, "boost": 1.0}}},
+                    {"match_phrase": {"title": {"query": q, "boost": 2.0}}},
+                    {"match": {"title": {"query": q, "fuzziness": "AUTO", "boost": 0.4}}}
+                ],
+                "minimum_should_match": 1
+            }
+        }
+    }
+
     try:
-        r = requests.post(
+        vector_response = requests.post(
             f"{OPENSEARCH_URL}/{INDEX_NAME}/_search",
-            json=body,
+            json=vector_body,
+            timeout=10,
+        )
+        text_response = requests.post(
+            f"{OPENSEARCH_URL}/{INDEX_NAME}/_search",
+            json=text_body,
             timeout=10,
         )
 
-        if r.status_code >= 400:
-            logger.error("OpenSearch error: %s", r.text)
-            raise HTTPException(status_code=500, detail=r.text)
+        if vector_response.status_code >= 400:
+            logger.error("OpenSearch vector error: %s", vector_response.text)
+            raise HTTPException(status_code=500, detail=vector_response.text)
+        if text_response.status_code >= 400:
+            logger.error("OpenSearch lexical error: %s", text_response.text)
+            raise HTTPException(status_code=500, detail=text_response.text)
 
-        hits = r.json().get("hits", {}).get("hits", [])
+        vector_hits = vector_response.json().get("hits", {}).get("hits", [])
+        text_hits = text_response.json().get("hits", {}).get("hits", [])
 
-        query_tokens = q.lower().split()
+        text_scores = normalize_text_score(
+            {
+                h.get("_id"): h.get("_score", 0)
+                for h in text_hits
+                if h.get("_id")
+            }
+        )
+        vector_scores = {
+            h.get("_id"): normalized_knn_score(h.get("_score", 0))
+            for h in vector_hits
+            if h.get("_id")
+        }
+
+        candidates = {}
+        for h in vector_hits + text_hits:
+            doc_id = h.get("_id")
+            if doc_id and doc_id not in candidates:
+                candidates[doc_id] = h
+
+        query_tokens = tokenize(q)
         content_tokens = [t for t in query_tokens if t not in STOPWORDS]
         if not content_tokens:
             content_tokens = query_tokens
 
         results = []
 
-        for h in hits:
+        for doc_id, h in candidates.items():
             title = h["_source"].get("title", "")
-            vector_score = h.get("_score", 0)
+            vector_score = vector_scores.get(doc_id, 0.0)
+            lexical_score = text_scores.get(doc_id, 0.0)
 
-            title_lower = title.lower()
+            title_tokens = tokenize(title)
+            title_lower = " ".join(title_tokens)
 
             # Content word overlap
-            content_matches = [t for t in content_tokens if t in title_lower]
+            title_token_set = set(title_tokens)
+            content_matches = [t for t in content_tokens if t in title_token_set]
             keyword_matches = len(content_matches)
 
             keyword_score = keyword_matches / max(len(content_tokens), 1)
+            fuzzy_score = jaccard_similarity(content_tokens, title_tokens)
 
             # If there is no overlap on important words and the query is reasonably
             # descriptive, apply a penalty so obviously off-topic results are pushed down.
@@ -529,18 +627,29 @@ def search(q: str, k: int = 5):
                 keyword_score -= 0.5
 
             # Phrase boost
-            if q.lower() in title_lower:
+            if q.lower() in title.lower():
                 keyword_score += 1.0
 
+            phrase_boost = 1.0 if q.lower() in title.lower() else 0.0
+
+            semantic_component = VECTOR_WEIGHT * vector_score
+            lexical_component = KEYWORD_WEIGHT * (0.65 * lexical_score + 0.35 * keyword_score)
+            phrase_component = PHRASE_WEIGHT * phrase_boost
+            fuzzy_component = FUZZY_WEIGHT * fuzzy_score
+
             # Final blended score
-            final_score = (
-                VECTOR_WEIGHT * vector_score +
-                KEYWORD_WEIGHT * keyword_score
-            )
+            final_score = semantic_component + lexical_component + phrase_component + fuzzy_component
 
             results.append({
+                "id": doc_id,
                 "title": title,
-                "score": final_score
+                "score": final_score,
+                "explain": {
+                    "semantic": round(semantic_component, 4),
+                    "lexical": round(lexical_component, 4),
+                    "phrase": round(phrase_component, 4),
+                    "fuzzy": round(fuzzy_component, 4),
+                }
             })
 
         # Manual sorting
