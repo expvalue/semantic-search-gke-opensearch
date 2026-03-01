@@ -35,6 +35,12 @@ Re-running the ingest creates the HNSW index; older indexes still work with the 
 
 ---
 
+## Data
+
+Product metadata is from [Amazon Reviews '23](https://amazon-reviews-2023.github.io/) (McAuley Lab). We use the **Amazon_Fashion** category: download the [meta](https://mcauleylab.ucsd.edu/public_datasets/data/amazon_2023/raw/meta_categories/meta_Amazon_Fashion.jsonl.gz) file, place it as `data/meta_Amazon_Fashion.jsonl.gz`, then run the ingest.
+
+---
+
 ## Config
 
 | What | Default | Override |
