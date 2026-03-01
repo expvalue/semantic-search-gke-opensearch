@@ -1,12 +1,25 @@
 import gzip
 import json
+import os
 import time
 import requests
 from sentence_transformers import SentenceTransformer
 
-OPENSEARCH_URL = "http://opensearch:9200"   # IMPORTANT: opensearch service name (NOT localhost)
-INDEX_NAME = "products"
+
+# =============================================================================
+# config
+# =============================================================================
+
+# local dev uses localhost; in docker set OPENSEARCH_URL=http://opensearch:9200
+OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
+INDEX_NAME = os.getenv("INDEX_NAME", "products")
 DIM = 384
+
+# HNSW params: bigger ef_construction = better graph but slower to build. m = links per node.
+HNSW_EF_CONSTRUCTION = 200
+HNSW_M = 24
+# how many candidates to look at when searching (more = better recall, slower)
+HNSW_EF_SEARCH = 200
 
 BATCH_SIZE = 200
 EMBED_BATCH_SIZE = 32
@@ -15,7 +28,12 @@ model = SentenceTransformer("all-MiniLM-L6-v2")
 session = requests.Session()
 
 
+# =============================================================================
+# opensearch readiness
+# =============================================================================
+
 def wait_for_opensearch(timeout_s=120):
+    """poll until OpenSearch is up or we hit the timeout"""
     start = time.time()
     while time.time() - start < timeout_s:
         try:
@@ -28,20 +46,37 @@ def wait_for_opensearch(timeout_s=120):
     return False
 
 
+# =============================================================================
+# index (recreate with HNSW + cosine)
+# =============================================================================
+
 def recreate_index():
-    # delete if exists
+    """drop the index if it exists and create it with HNSW knn_vector mapping (cosine space)"""
     session.delete(f"{OPENSEARCH_URL}/{INDEX_NAME}", timeout=30)
 
     mapping = {
         "settings": {
             "index": {
-                "knn": True
+                "knn": True,
+                "knn.algo_param.ef_search": HNSW_EF_SEARCH
             }
         },
         "mappings": {
             "properties": {
                 "title": {"type": "text"},
-                "embedding": {"type": "knn_vector", "dimension": DIM}
+                "embedding": {
+                    "type": "knn_vector",
+                    "dimension": DIM,
+                    "method": {
+                        "name": "hnsw",
+                        "space_type": "cosinesimil",
+                        "engine": "nmslib",
+                        "parameters": {
+                            "ef_construction": HNSW_EF_CONSTRUCTION,
+                            "m": HNSW_M
+                        }
+                    }
+                }
             }
         }
     }
@@ -54,12 +89,15 @@ def recreate_index():
     r.raise_for_status()
 
 
+# same prefix as search_service so query and doc embeddings line up
+DOC_EMBED_PREFIX = "Clothing, fashion product or accessory: "
+
+
 def build_text(doc):
     parts = []
     if doc.get("title"):
         parts.append(str(doc["title"]))
 
-    # some datasets use lists, some use strings
     for key in ["description", "features"]:
         val = doc.get(key)
         if isinstance(val, list):
@@ -70,11 +108,16 @@ def build_text(doc):
     if doc.get("store"):
         parts.append(str(doc["store"]))
 
-    return " ".join(parts).strip()
+    raw = " ".join(parts).strip()
+    return (DOC_EMBED_PREFIX + raw) if raw else raw
 
+
+# =============================================================================
+# bulk index
+# =============================================================================
 
 def bulk_index(items, embs):
-    # NDJSON bulk format MUST end with newline
+    """send one bulk request: each item gets title + embedding, NDJSON with trailing newline"""
     lines = []
     for item, emb in zip(items, embs):
         lines.append(json.dumps({"index": {"_index": INDEX_NAME}}))
@@ -94,7 +137,6 @@ def bulk_index(items, embs):
 
     resp = r.json()
     if resp.get("errors"):
-        # show first error to debug quickly
         for it in resp.get("items", []):
             idx = it.get("index", {})
             if idx.get("error"):
@@ -102,7 +144,12 @@ def bulk_index(items, embs):
         raise RuntimeError("Bulk ingest had errors, but couldn't extract example.")
 
 
+# =============================================================================
+# main
+# =============================================================================
+
 def main():
+    """wait for OpenSearch, recreate index, stream the gzipped jsonl and index in batches"""
     if not wait_for_opensearch():
         raise RuntimeError("OpenSearch never became ready (timeout).")
 
@@ -132,7 +179,6 @@ def main():
                 print(f"Indexed {indexed} docs (read line {i})")
                 buffer = []
 
-    # flush remainder
     if buffer:
         texts = [x["text"] for x in buffer]
         embs = model.encode(texts, batch_size=EMBED_BATCH_SIZE, show_progress_bar=False)
