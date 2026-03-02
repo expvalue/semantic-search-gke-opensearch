@@ -449,6 +449,19 @@ def _hits_to_results(hits: list, q: str, k: int, query_embedding: list = None) -
 # api: search
 # =============================================================================
 
+def _opensearch_error_detail(status_code: int, text: str) -> str:
+    """turn OpenSearch errors into a short message so the UI shows something useful (e.g. on GKE)"""
+    if status_code == 404 or (text and "index_not_found" in text.lower()):
+        return (
+            "Index '%s' not found. Run the ingest script to load data: "
+            "port-forward OpenSearch (kubectl port-forward svc/opensearch 9200:9200), "
+            "then set OPENSEARCH_URL=http://localhost:9200 and run python ingest/ingest_fashion.py. See DEPLOY-GKE.md."
+        ) % INDEX_NAME
+    if status_code >= 500:
+        return "OpenSearch is unavailable or overloaded. Try again in a moment."
+    return (text[:300] + "…") if text and len(text) > 300 else (text or "Unknown error")
+
+
 @app.get("/search")
 def search(q: str, k: int = 5):
     """vector search first (knn), then re-rank with semantic + keyword + gender; if knn fails we fall back to plain match on title"""
@@ -461,54 +474,58 @@ def search(q: str, k: int = 5):
     logger.info("Search query received: %s", q)
     url = f"{OPENSEARCH_URL}/{INDEX_NAME}/_search"
 
-    # try vector search first (we embed the query with the same prefix as the docs)
     try:
-        embedding = embed_cached(_query_for_embedding(q))
-        knn_body = {
-            "size": 50,
-            "query": {
+        # try vector search first (we embed the query with the same prefix as the docs)
+        try:
+            embedding = embed_cached(_query_for_embedding(q))
+            knn_body = {
+                "size": 50,
                 "knn": {
-                    "embedding": {
-                        "vector": embedding,
-                        "k": 50,
-                        "method_parameters": {"ef_search": KNN_EF_SEARCH},
-                    }
+                    "field": "embedding",
+                    "query_vector": embedding,
+                    "k": 50,
+                    "num_candidates": 50
                 }
-            },
-        }
-        r = _run_search(url, knn_body)
-        if r.status_code < 400:
-            hits = r.json().get("hits", {}).get("hits", [])
-            return _hits_to_results(hits, q, k, query_embedding=embedding)
+            }
+            r = _run_search(url, knn_body)
+            if r.status_code < 400:
+                hits = r.json().get("hits", {}).get("hits", [])
+                return _hits_to_results(hits, q, k, query_embedding=embedding)
 
-        # knn failed, fall back to plain text match on title
-        logger.warning("KNN search failed (%s), trying match fallback: %s", r.status_code, r.text[:200])
-    except requests.RequestException as e:
-        logger.warning("OpenSearch unreachable: %s", str(e))
-        raise HTTPException(
-            status_code=503,
-            detail="OpenSearch is not running. Start it with: cd infra && docker compose up -d opensearch. Then run the ingest script to index data. (%s)" % str(e),
-        )
-
-    # fallback: just match on title (no vectors)
-    try:
-        match_body = {
-            "size": 50,
-            "query": {"match": {"title": {"query": q, "fuzziness": "AUTO"}}},
-        }
-        r2 = _run_search(url, match_body)
-        if r2.status_code >= 400:
-            logger.error("Fallback match also failed: %s", r2.text)
+            # knn failed, fall back to plain text match on title
+            logger.warning("KNN search failed (%s), trying match fallback: %s", r.status_code, r.text[:200])
+        except requests.RequestException as e:
+            logger.warning("OpenSearch unreachable: %s", str(e))
             raise HTTPException(
-                status_code=500,
-                detail="Search failed. OpenSearch error: %s" % (r2.text[:500] if r2.text else "unknown"),
+                status_code=503,
+                detail="OpenSearch is not running or not reachable. Check that the OpenSearch pod is up and OPENSEARCH_URL is correct. (%s)" % str(e),
             )
-        hits = r2.json().get("hits", {}).get("hits", [])
-        embedding = embed_cached(_query_for_embedding(q))
-        return _hits_to_results(hits, q, k, query_embedding=embedding)
-    except requests.RequestException as e:
-        logger.warning("OpenSearch unreachable: %s", str(e))
+
+        # fallback: just match on title (no vectors)
+        try:
+            match_body = {
+                "size": 50,
+                "query": {"match": {"title": {"query": q, "fuzziness": "AUTO"}}},
+            }
+            r2 = _run_search(url, match_body)
+            if r2.status_code >= 400:
+                detail = _opensearch_error_detail(r2.status_code, r2.text or "")
+                logger.error("Fallback match failed: %s", detail)
+                raise HTTPException(status_code=503, detail=detail)
+            hits = r2.json().get("hits", {}).get("hits", [])
+            embedding = embed_cached(_query_for_embedding(q))
+            return _hits_to_results(hits, q, k, query_embedding=embedding)
+        except requests.RequestException as e:
+            logger.warning("OpenSearch unreachable: %s", str(e))
+            raise HTTPException(
+                status_code=503,
+                detail="OpenSearch is not running or not reachable. (%s)" % str(e),
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Search failed with unexpected error")
         raise HTTPException(
-            status_code=503,
-            detail="OpenSearch is not running. Start it with: cd infra && docker compose up -d opensearch. Then run the ingest script to index data. (%s)" % str(e),
+            status_code=500,
+            detail="Search failed: %s. Check server logs." % str(e),
         ) 

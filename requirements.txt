@@ -2,4 +2,4 @@ fastapi
 uvicorn
 requests
 sentence-transformers
-torch
+torch==2.2.2
